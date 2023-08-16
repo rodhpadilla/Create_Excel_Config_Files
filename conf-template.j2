@@ -1,0 +1,410 @@
+{{Branch_Name}}
+{{Hostname}}
+{{Loopback}}
+
+
+STEPS:
+
+0.- SSH device: {{Hostname}}
+1.- Check that user myCiscoUser is on the configuration
+
+show run | in secret
+
+username myCiscoUser secret 8 12sXoFlvj1N42fqw12
+enable secret 8 Ykj4G3dgGp/wewe3134fcb
+
+
+2.- Check that new Loopback0 interface with IP {{Loopback}} is configured if not, proceed with the configuration
+
+interface loopback0
+description NeK-{{Hostname}}-Lo0-MGMT
+ip address {{Loopback}} 255.255.255.255
+
+! Ensure you can reach the IP {{Loopback}} from the VDI.  If not check that is advertised on BGP
+
+
+3.- Loogout from {{Hostname}} and SSH using new loopback: {{Loopback}}
+4.- Check the configuration from the old WAN interface:
+
+show ip int brief
+show run interface {{Current_interface}}
+show run interface {{Current_interface}}.{{Current_Vlan}}
+
+5.- Configure the NEW interface and the new subinterface:
+
+interface {{New_interface}}
+description MPLS-{{New_Circuit_ID}}-Spectrum
+{% if New_BW == "20MB" -%}
+bandwidth 20000
+{% elif New_BW == "10MB" -%}
+bandwidth 10000
+ {% elif New_BW == "8MB" -%}
+bandwidth 8000
+ {% elif New_BW == "4MB" -%}
+bandwidth 4000
+ {% else -%}
+bandwidth 2000
+ {% endif -%}
+ no ip address
+ no negotiation auto
+ duplex full
+ speed 100
+ load-interval 30
+ no cdp enable
+ snmp trap link-status
+ logging event link-status
+ no shutdown
+
+interface {{New_interface}}.{{New_Vlan}}
+ description MPLS-{{New_Circuit_ID}}-Spectrum
+ encapsulation dot1Q {{New_Vlan}}
+ {% if New_BW == "20MB" -%}
+bandwidth 20000
+ {% elif New_BW == "10MB" -%}
+bandwidth 10000
+ {% elif New_BW == "8MB" -%}
+bandwidth 8000
+ {% elif New_BW == "4MB" -%}
+bandwidth 4000
+ {% else -%}
+bandwidth 2000
+ {% endif -%}
+ ip address {{New_WAN_IP_CE}} 255.255.255.252
+ no shutdown
+
+do sh interface {{New_interface}} | in line|Duplex|CRC|error
+do ping {{New_WAN_IP_PE}} repeat 200 size 1500
+do ping {{New_WAN_IP_PE}} dscp ef repeat 200
+do ping {{New_WAN_IP_PE}} dscp cs5 repeat 200
+do ping {{New_WAN_IP_PE}} dscp cs3 repeat 200
+
+
+6.- ROUTING.  Check the old BGP configuration and adjust it with the new.
+
+do show run | se router bgp
+do show run | se eigrp
+do sh ip bgp neighbors {{Neighbor_bgp_ip}} advertised-routes
+do sh ip bgp neighbors {{Neighbor_bgp_ip}} routes
+
+DONT FORGET!! to use the same route-maps,prefix-list,filter-list than old circuit. Adjust if necessary!
+
+! PRI ROUTE-MAP JUST IN CASE IS MISSED !
+
+route-map PRINCIPAL permit 10
+ match ip address prefix-list IPSUBNETOUT
+ set community 8151:1025
+
+ip as-path access-list 10 permit ^$
+
+router bgp 65194
+ neighbor {{New_WAN_IP_PE}} remote-as 8151
+ neighbor {{New_WAN_IP_PE}} timers 10 30
+ neighbor {{New_WAN_IP_PE}} send-community
+ neighbor {{New_WAN_IP_PE}} prefix-list IPSUBNETIN in
+ neighbor {{New_WAN_IP_PE}} route-map PRINCIPAL out
+ neighbor {{New_WAN_IP_PE}} soft-reconfiguration inbound
+ neighbor {{New_WAN_IP_PE}} filter-list 10 out
+
+ENSURE BGP session is stablished
+
+{% if EIGRP_AS != '' -%}
+
+EIGRP is running, Adjust it if necessary!
+
+router eigrp {{EIGRP_AS}}
+  {% if New_BW == "20MB" -%}
+redistribute bgp 65194 metric 20000 100 255 1 1500
+  {% elif New_BW == "10MB" -%}
+redistribute bgp 65194 metric 10000 100 255 1 1500
+  {% elif New_BW == "8MB" -%}
+redistribute bgp 65194 metric 8192 100 255 1 1500
+  {% elif New_BW == "4MB" -%}
+redistribute bgp 65194 metric 4096 100 255 1 1500
+  {% elif New_BW == "2MB" -%}
+redistribute bgp 65194 metric 2048 100 255 1 1500
+  {% endif -%}
+network {{Loopback}} 0.0.0.0
+
+{% endif -%}
+
+do sh ip bgp summ
+do sh ip bgp neighbors {{New_WAN_IP_PE}} advertised-routes
+do sh ip bgp neighbors {{New_WAN_IP_PE}} routes
+
+
+7.- Shaping. Configure and apply new shaping with the new speed {{New_BW}}
+!
+{% if New_BW == "20MB" -%}
+policy-map CBWFQ&WRED_20M
+ class class-Network-Critical
+  bandwidth percent 12
+  queue-limit 150 packets
+ class class1-Voice
+  priority percent 26
+  queue-limit 512 packets
+ class class1-Video
+  bandwidth percent 17
+  queue-limit 150 packets
+  random-detect dscp-based
+  random-detect dscp af41 150 150
+  random-detect dscp af42 120 142 20
+  random-detect dscp af43 97 120 10
+ class class2-Signalling
+  bandwidth percent 5
+  queue-limit 300 packets
+ class class2-Response-Time-Critical
+  bandwidth percent 20
+  queue-limit 225 packets
+  random-detect dscp-based
+  random-detect dscp af31 180 225
+  random-detect dscp af32 157 225
+  random-detect dscp af33 135 225
+ class class4-Non-Time-Sensitive
+  bandwidth percent 4
+  queue-limit 225 packets
+  random-detect dscp-based
+  random-detect dscp af11 180 225
+  random-detect dscp af12 157 225
+  random-detect dscp af13 135 225
+ class class-Scavenger
+  bandwidth percent 1
+ class class-default
+  bandwidth percent 15
+  queue-limit 300 packets
+  random-detect dscp-based
+  random-detect dscp af21 240 300
+  random-detect dscp af22 210 300
+  random-detect dscp af23 180 300
+  random-detect dscp 0 270 300
+
+policy-map shape_20M
+ class class-default
+  shape average 18000000 180000
+  service-policy CBWFQ&WRED_20M
+
+interface {{New_interface}}.{{New_Vlan}}
+no service-policy output shape4M
+no service-policy output shape8M
+no service-policy output shape10M
+no service-policy output rpvm_p18_out
+service-policy output shape_20M
+
+{% elif New_BW == "10MB" -%}
+policy-map CBWFQ&WRED_10M
+ class class-Network-Critical
+  bandwidth percent 12
+  queue-limit 150 packets
+ class class1-Voice
+  priority percent 26
+  queue-limit 512 packets
+ class class1-Video
+  bandwidth percent 17
+  queue-limit 150 packets
+  random-detect dscp-based
+  random-detect dscp af41 150 150
+  random-detect dscp af42 120 142 20
+  random-detect dscp af43 97 120 10
+ class class2-Signalling
+  bandwidth percent 5
+  queue-limit 300 packets
+ class class2-Response-Time-Critical
+  bandwidth percent 20
+  queue-limit 225 packets
+  random-detect dscp-based
+  random-detect dscp af31 180 225
+  random-detect dscp af32 157 225
+  random-detect dscp af33 135 225
+ class class4-Non-Time-Sensitive
+  bandwidth percent 4
+  queue-limit 225 packets
+  random-detect dscp-based
+  random-detect dscp af11 180 225
+  random-detect dscp af12 157 225
+  random-detect dscp af13 135 225
+ class class-Scavenger
+  bandwidth percent 1
+ class class-default
+  bandwidth percent 15
+  queue-limit 300 packets
+  random-detect dscp-based
+  random-detect dscp af21 240 300
+  random-detect dscp af22 210 300
+  random-detect dscp af23 180 300
+  random-detect dscp 0 270 300
+
+policy-map shape_10M
+ class class-default
+  shape average 9000000 90000
+  service-policy CBWFQ&WRED_10M
+
+interface {{New_interface}}.{{New_Vlan}}
+no service-policy output shape4M
+no service-policy output shape8M
+no service-policy output rpvm_p18_out
+service-policy output shape_10M
+
+{% elif New_BW == "8MB" -%}
+policy-map CBWFQ&WRED_8M
+ class class-Network-Critical
+  bandwidth percent 12
+  queue-limit 150 packets
+ class class1-Voice
+  priority percent 26
+  queue-limit 512 packets
+ class class1-Video
+  bandwidth percent 17
+  queue-limit 150 packets
+  random-detect dscp-based
+  random-detect dscp af41 150 150
+  random-detect dscp af42 120 142 20
+  random-detect dscp af43 97 120 10
+ class class2-Signalling
+  bandwidth percent 5
+  queue-limit 300 packets
+ class class2-Response-Time-Critical
+  bandwidth percent 20
+  queue-limit 225 packets
+  random-detect dscp-based
+  random-detect dscp af31 180 225
+  random-detect dscp af32 157 225
+  random-detect dscp af33 135 225
+ class class4-Non-Time-Sensitive
+  bandwidth percent 4
+  queue-limit 225 packets
+  random-detect dscp-based
+  random-detect dscp af11 180 225
+  random-detect dscp af12 157 225
+  random-detect dscp af13 135 225
+ class class-Scavenger
+  bandwidth percent 1
+ class class-default
+  bandwidth percent 15
+  queue-limit 300 packets
+  random-detect dscp-based
+  random-detect dscp af21 240 300
+  random-detect dscp af22 210 300
+  random-detect dscp af23 180 300
+  random-detect dscp 0 270 300
+
+policy-map shape_8M
+ class class-default
+  shape average 7200000 72000
+  service-policy CBWFQ&WRED_8M
+
+interface {{New_interface}}.{{New_Vlan}}
+service-policy output shape_8M
+
+{% elif New_BW == "4MB" -%}
+policy-map CBWFQ&WRED_4M
+ class class-Network-Critical
+  bandwidth percent 12
+  queue-limit 150 packets
+ class class1-Voice
+  priority percent 26
+  queue-limit 512 packets
+ class class1-Video
+  bandwidth percent 17
+  queue-limit 150 packets
+  random-detect dscp-based
+  random-detect dscp af41 150 150
+  random-detect dscp af42 120 142 20
+  random-detect dscp af43 97 120 10
+ class class2-Signalling
+  bandwidth percent 5
+  queue-limit 300 packets
+ class class2-Response-Time-Critical
+  bandwidth percent 20
+  queue-limit 225 packets
+  random-detect dscp-based
+  random-detect dscp af31 180 225
+  random-detect dscp af32 157 225
+  random-detect dscp af33 135 225
+ class class4-Non-Time-Sensitive
+  bandwidth percent 4
+  queue-limit 225 packets
+  random-detect dscp-based
+  random-detect dscp af11 180 225
+  random-detect dscp af12 157 225
+  random-detect dscp af13 135 225
+ class class-Scavenger
+  bandwidth percent 1
+ class class-default
+  bandwidth percent 15
+  queue-limit 300 packets
+  random-detect dscp-based
+  random-detect dscp af21 240 300
+  random-detect dscp af22 210 300
+  random-detect dscp af23 180 300
+  random-detect dscp 0 270 300
+
+policy-map shape_4M
+ class class-default
+  shape average 3600000 36000
+  service-policy CBWFQ&WRED_4M
+
+interface {{New_interface}}.{{New_Vlan}}
+no service-policy output shape2M
+no service-policy output rpvm_p18_out
+service-policy output shape_4M
+
+{% else -%}
+policy-map CBWFQ&WRED_2M
+ class class-Network-Critical
+  bandwidth percent 5
+  queue-limit 100 packets
+ class class1-Voice
+  priority percent 33
+  queue-limit 512 packets
+ class class1-Video
+  bandwidth percent 17
+  queue-limit 100 packets
+  random-detect dscp-based
+  random-detect dscp af41 100 100
+  random-detect dscp af42 80 95 20
+  random-detect dscp af43 65 80 10
+ class class2-Signalling
+  bandwidth percent 5
+  queue-limit 200 packets
+ class class2-Response-Time-Critical
+  bandwidth percent 20
+  queue-limit 150 packets
+  random-detect dscp-based
+  random-detect dscp af31 120 150
+  random-detect dscp af32 105 150
+  random-detect dscp af33 90 150
+ class class4-Non-Time-Sensitive
+  bandwidth percent 4
+  queue-limit 150 packets
+  random-detect dscp-based
+  random-detect dscp af11 120 150
+  random-detect dscp af12 105 150
+  random-detect dscp af13 90 150
+ class class-Scavenger
+  bandwidth percent 1
+ class class-default
+  bandwidth percent 15
+  queue-limit 200 packets
+  random-detect dscp-based
+  random-detect dscp af21 160 200
+  random-detect dscp af22 140 200
+  random-detect dscp af23 120 200
+  random-detect dscp 0 180 200
+
+policy-map shape_2M
+ class class-default
+  shape average 1800000 18000
+  service-policy CBWFQ&WRED_2M
+
+interface {{New_interface}}.{{New_Vlan}}
+no service-policy output rpvm_p18_out
+service-policy output shape_2M
+
+{% endif -%}
+
+do sh ip int br
+do sh policy-map interface {{New_interface}}.{{New_Vlan}}
+
+
+8.- Save the config
+
+write memory
